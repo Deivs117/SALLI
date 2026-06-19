@@ -1,0 +1,24 @@
+# --- ESP-IDF Global Ignore ---
+**/build/
+
+# Ignore IDE/Editor artifacts
+**/.vscode/
+**/.clangd
+**/.cache/
+**/.history/
+**/.settings/
+**/.project
+**/.cproject
+
+# Ignore ESP-IDF generated files
+**/sdkconfig
+**/sdkconfig.old
+**/sdkconfig.ci*
+**/dependencies.lock
+
+# Ignore ESP-IDF Managed Components (often local/generated)
+**/managed_components/
+
+# --- Standard OS Files ---
+.DS_Store
+Thumbs.db
