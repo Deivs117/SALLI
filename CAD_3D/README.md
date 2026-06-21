@@ -23,13 +23,30 @@ To accommodate global developers, the folder names are kept in Spanish as genera
 
 The backbone of SALLI relies on a **dovetail-inspired sliding locking mechanism** secured with standard metric machine screws. 
 
-```text
-    [Module N-1]             [Connector Interface]            [Module N]
-+------------------+        +---------------------+       +------------------+
-|                  |=======>|   Dovetail Slot &   |<======|                  |
-|  Passive Tail    |        |  M3 Retaining Bolt  |       | Active Actuator  |
-+------------------+        +---------------------+       +------------------+
+```mermaid
+flowchart LR
+    %% Definición de los Módulos Físicos
+    ModuleA["Module N-1: Passive Tail"]
+    ModuleB["Module N: Active Actuator"]
 
+    %% Interfaz Central de Conexión
+    subgraph Interface ["Connector Interface"]
+        direction TB
+        Slot["Dovetail Slot Joint"]
+        Bolt["M3 Retaining Bolt"]
+        Slot --- Bolt
+    end
+
+    %% Relaciones de Ensamble y Dirección de Acople
+    ModuleA ==>|Sliding Alignment| Slot
+    ModuleB ==>|Mechanical Lock| Bolt
+
+    %% Estilos de Ingeniería Libres de Emojis
+    style ModuleA fill:#1a1a1a,stroke:#444,stroke-width:2px,color:#fff
+    style ModuleB fill:#1a1a1a,stroke:#444,stroke-width:2px,color:#fff
+    style Interface fill:#2d2d2d,stroke:#666,stroke-width:1px,color:#fff
+    style Slot fill:#3d3d3d,stroke:#777,color:#fff
+    style Bolt fill:#3d3d3d,stroke:#777,color:#fff
 ```
 
 * **No Glue Required:** All connections are held in place mechanically, ensuring that cracked components can be easily unscrewed, reprinted, and replaced.

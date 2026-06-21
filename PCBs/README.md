@@ -9,26 +9,50 @@ This directory contains the electrical designs for SALLI's custom printed circui
 
 SALLI uses a decentralized, modular electrical bus system. Power is distributed along the spine via a ruggedized internal backbone, preventing major voltage drops from affecting the master microcontroller.
 
-```text
-                 +---------------------------------+
-                 |       Main Battery Pack         |
-                 |      (e.g., 2S LiPo / 7.4V)     |
-                 +---------------------------------+
-                        |                   |
-                        v                   v
-             +-----------------+     +-----------------+
-             | Servo Regulators|     | Logic Regulators|
-             |   (5V - 6V)     |     |     (3.3V)      |
-             +-----------------+     +-----------------+
-                        |                   |
-                        v                   v
-              =====================================
-                  SALLI Power & Communication Bus
-              =====================================
-                 |               |               |
-                 v               v               v
-           [HeadModule]     [Oscilatory]   [Legs_Module]
+```mermaid
+flowchart TD
+    %% Definición de Bloques Principales
+    Battery["Main Battery Pack<br>(2S LiPo / 7.4V)"]
+    RegServo["Servo Regulators<br>(5V - 6V)"]
+    RegLogic["Logic Regulators<br>(3.3V)"]
+    
+    %% Representación del Bus Centralizado
+    subgraph Bus ["SALLI Power & Communication Bus"]
+        direction LR
+        Lines["Power Rails & Signal Traces"]
+    end
 
+    %% Módulos de Destino (PCBs)
+    Head["HeadModule<br>(Master Processing)"]
+    Osc["Oscilatory<br>(Spine Segment)"]
+    Legs["Legs_Module<br>(High-Current Driver)"]
+
+    %% Conexiones e Interconexión Eléctrica
+    Battery ==>|Raw VCC| RegServo
+    Battery -->|Raw VCC| RegLogic
+    
+    RegServo ==>|High-Current Servo VCC| Lines
+    RegLogic -->|Isolated Clean 3.3V| Lines
+
+    Lines ==> Head
+    Lines ==> Osc
+    Lines ==> Legs
+
+    %% Estilos de Ingeniería Avanzada (Sin Emojis)
+    style Battery fill:#1a1a1a,stroke:#bf616a,stroke-width:2px,color:#fff
+    style RegServo fill:#2d2d2d,stroke:#d08770,stroke-width:1px,color:#fff
+    style RegLogic fill:#2d2d2d,stroke:#ebcb8b,stroke-width:1px,color:#fff
+    style Bus fill:#232831,stroke:#81a1c1,stroke-width:2px,color:#fff
+    style Lines fill:#3b4252,stroke:#88c0d0,stroke-width:1px,color:#fff
+    style Head fill:#1a1a1a,stroke:#4c566a,stroke-width:1px,color:#fff
+    style Osc fill:#1a1a1a,stroke:#4c566a,stroke-width:1px,color:#fff
+    style Legs fill:#1a1a1a,stroke:#4c566a,stroke-width:1px,color:#fff
+    
+    %% Definición de grosores de línea para diferenciar potencia de lógica
+    linkStyle 0 stroke:#bf616a,stroke-width:3px;
+    linkStyle 1 stroke:#ebcb8b,stroke-width:1px;
+    linkStyle 2 stroke:#d08770,stroke-width:3px;
+    linkStyle 3 stroke:#ebcb8b,stroke-width:1px;
 ```
 
 ---
