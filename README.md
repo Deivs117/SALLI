@@ -2,6 +2,8 @@
 
 SALLI is an open-source, low-cost, and modular mechatronic platform designed to study bio-inspired terrestrial locomotion. Drawing inspiration from the sprawling gait of the salamander, this project integrates custom 3D-printed mechanical linkages, dedicated modular printed circuit boards (PCBs), lightweight embedded ESP-IDF firmware, and high-level Python control algorithms.
 
+![SALLI General View](CAD_3D/Ensamble%20Total/SALLI_General_View.png)
+
 ---
 
 ## Project Vision & Philosophy
