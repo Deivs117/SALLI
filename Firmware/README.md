@@ -1,87 +1,215 @@
-# **SALLI: ESP-IDF Embedded Firmware**
+# SALLI: ESP-IDF Firmware Ecosystem
 
-This directory contains the optimized, low-level C firmware developed specifically for the **ESP32-C3 Mini** microcontroller utilizing Espressif's native **ESP-IDF (IoT Development Framework)**.
+This directory contains the dual-node embedded firmware framework developed for SALLI. The entire subsystem is built using Espressif's native **ESP-IDF (IoT Development Framework) v5.1+** for the **ESP32-C3 Mini** microcontroller. By bypassing the Arduino abstraction layer, this firmware achieves microsecond-precision hardware timing, efficient multi-tasking via **FreeRTOS**, and low-overhead network serialization.
 
-To ensure optimal execution times, task scheduling, and real-time networking, the firmware is written without the bulky overhead of the Arduino framework, leaning heavily on native **FreeRTOS** APIs.
+---
 
-## **💾 Firmware Subsystems**
+## Distributed Firmware Architecture
 
-The firmware is split into two specialized codebase architectures depending on the micro-controller's deployment location:
+SALLI's movement and data routing are handled by two software execution profiles deployed across distinct physical units:
 
-### **1\. Acces Point Sally (Master Controller)**
+1. **Master Node (`Acces Point Sally`):** Acts as the centralized coordinator located in the robot's Head Module. It initializes a Wi-Fi SoftAP, hosts an HTTP REST API server, loads/saves calibration arrays from Flash memory, computes gait kinematics using deterministic timers, and distributes targeting data.
+2. **Slave Node (`WIFI_Movement`):** Deployed across localized motor-driver segments. It connects to the Master SoftAP as a Station (STA), opens an HTTP client polling loop, parses joint angles, and drives hardware timers using the ESP32 LEDC peripheral.
 
-This node acts as the primary computational gateway of the robot. Located in the Head Module, it manages top-level control.
+```mermaid
+graph TD
+    subgraph MasterNode [Head Module: Master Access Point]
+        M_WiFi[ESP-IDF Wi-Fi SoftAP]
+        M_HTTP[HTTP REST Server]
+        M_NVS[NVS Flash Manager]
+        M_Timer[High-Resolution esp_timer]
+        M_Gait[Gait Engine: Central Pattern Generator]
+        
+        M_WiFi --> M_HTTP
+        M_NVS <-->|Load/Save Offsets| M_HTTP
+        M_Timer -->|Trigger 20ms Loop| M_Gait
+        M_Gait -->|Update Angles Buffer| M_HTTP
+    end
 
-* **Network Role:** Configures the ESP32-C3 chip as a local **Wi-Fi Access Point (AP)**.  
-* **Computational Load:** Houses the central state machines, parses incoming target vectors from the Python base station, and coordinates the gait angles.  
-* **Joint Routing:** Drives local head/neck servos and packages raw target angles for downstream modules.
+    subgraph ClientLayer [High-Level Orchestration]
+        Py_Ctrl[Python Station / YOLO]
+    end
 
-### **2\. WIFI\_Movement (Actuator Node)**
+    subgraph SlaveNode [Legs/Spine Modules: Station Nodes]
+        S_WiFi[Wi-Fi Station Mode]
+        S_Client[HTTP Client Poll Task]
+        S_JSON[cJSON Parser Engine]
+        S_LEDC[LEDC PWM Driver]
+        
+        S_WiFi --> S_Client
+        S_Client --> S_JSON
+        S_JSON --> S_LEDC
+    end
 
-This lightweight node is flashed onto the secondary ESP32-C3 processors integrated into deep segments (like the legs or rear spine segments).
+    Py_Ctrl -->|HTTP GET /drive<br>HTTP POST /calib| M_HTTP
+    S_Client -->|HTTP GET /angles?id=N| M_HTTP
 
-* **Network Role:** Configures the module to run in **Wi-Fi Station (STA) Mode**, connecting to the Acces Point Sally local network.  
-* **Low-Latency UDP Socket:** Opens a non-blocking listening socket. It consumes serialized target vectors sent from the master node.  
-* **Hardware Interfacing:** Decodes incoming angle arrays into accurate duty cycles for high-resolution PWM outputs via the ESP32 **LEDC (LED Controller)** peripheral.
+```
 
-## **🔄 Dynamic State Machine**
+---
 
-The master controller manages transitions using a lightweight Real-Time Operating System (RTOS) task schedule:
+## Master Node Execution & FreeRTOS Task Lifecycle
 
-       \+-----------------------+  
-       |       BOOT / INIT     |  
-       \+-----------------------+  
-                   |  
-                   v  
-       \+-----------------------+  
-       |   WAITING\_FOR\_CONN    |\<-----------+  
-       \+-----------------------+            | (Client  
-                   |                        | Disconnected)  
-                   | (Client Connected)     |  
-                   v                        |  
-       \+-----------------------+            |  
-       |     ACTIVE\_STREAM     |------------+  
-       \+-----------------------+  
-         /         |         \\  
-        v          v          v  
-   \[CALIBRATE\]  \[TELEOP\]  \[AUTONOMOUS\]
+The Master firmware coordinates multiple asynchronous operations by distributing computational load across FreeRTOS task handles and hardware interrupts.
 
-## **🔌 Communication Protocol Technical Specifications**
+### State Machine Transitions
 
-To sustain a control cycle rate of at least ![][image1] without data congestion, the firmware uses low-overhead UDP structures instead of TCP.
+The system operation relies on three primary states managed by an internal enum (`run_mode_t`):
 
-### **Data Packet Structure (UDP Payload)**
+* `MODE_IDLE`: Servos are soft-locked; no traveling waves are computed.
+* `MODE_CALIB`: The network forces a raw neutral output ($90^\circ$ baseline) across all channels, bypassing the calibration Lookup Tables (LUT) to isolate physical alignment errors.
+* `MODE_RUN`: Active state. The high-resolution hardware timer synthesizes real-time sinewaves and updates them by injecting the saved NVS mechanical offsets.
 
-The typical message contains a small header followed by float values mapping directly to servo positions:
+```mermaid
+stateDiagram-v2
+    [*] --> INITIALIZATION : Boot / Core Power-On
+    
+    state INITIALIZATION {
+        [*] --> NVS_Flash_Init
+        NVS_Flash_Init --> Netif_And_Event_Loop
+        Netif_And_Event_Loop --> WiFi_SoftAP_Start
+        WiFi_SoftAP_Start --> HTTP_Server_Register
+    }
+    
+    INITIALIZATION --> MODE_IDLE : Default State Entry
+    
+    state MODE_IDLE {
+        [*] --> Idle_Active
+        note right of Idle_Active
+            Gait computation stopped.
+            Servos holding last position.
+        end note
+    }
+    
+    MODE_IDLE --> MODE_CALIB : HTTP Request /mode?state=calib
+    MODE_CALIB --> MODE_IDLE : HTTP Request /mode?state=idle
+    
+    state MODE_CALIB {
+        [*] --> Calib_Active
+        note right of Calib_Active
+            Forces pure 90° across all joints.
+            Bypasses NVS offset summation.
+        end note
+    }
+    
+    MODE_CALIB --> MODE_RUN : HTTP Request /mode?state=run
+    MODE_RUN --> MODE_IDLE : HTTP Request /mode?state=idle
+    
+    state MODE_RUN {
+        [*] --> Run_Active
+        note right of Run_Active
+            Core esp_timer active.
+            Generates kinematics waves.
+            Applies: Base + Offset + Wave
+        end note
+    }
 
-\+----------------------+--------------------+---------------------+  
-| uint16\_t Packet ID   | uint8\_t State ID   | float32\_t Angles\[\]  |  
-| 2 Bytes              | 1 Byte             | N \* 4 Bytes         |  
-\+----------------------+--------------------+---------------------+
+```
 
-## **🔨 Compiling and Flashing with ESP-IDF**
+### Deterministic Kinematic Synthesis Loop
 
-### **Prerequisites**
+Rather than using loose FreeRTOS task delays which suffer from scheduler jitter, the rhythmic locomotion patterns are calculated via a hardware-backed high-resolution timer interrupt (`esp_timer_handle_t`) configured to fire precisely every $\Delta t = 20\text{ ms}$ ($50\text{ Hz}$).
 
-1. Install ESP-IDF (Version 5.1 or later is highly recommended).  
-2. Set up your environment variables (e.g., source the setup script: export.sh or setup.bat).
+To enforce joint protection and limit acceleration, target values are fed through an analytical convergence function that acts as a low-pass slew rate limiter:
 
-### **Build & Flash Steps**
+$$\theta_{\text{current}}(t) = \theta_{\text{current}}(t-\Delta t) + \text{clamp}\left(\theta_{\text{target}}(t) - \theta_{\text{current}}(t-\Delta t), -\Omega_{\text{max}}\cdot\Delta t, \Omega_{\text{max}}\cdot\Delta t\right)$$
 
-Navigate to either the Acces Point Sally or WIFI\_Movement directory, then execute:
+Where:
 
-\# Set target chip to ESP32-C3  
-idf.py set-target esp32c3
+* $\Omega_{\text{max}}$ represents the maximum allowable angular velocity expressed in degrees per second ($dps$).
 
-\# Open configuration menu (useful for changing Wi-Fi SSID/Password)  
-idf.py menuconfig
+---
 
-\# Build project binaries  
-idf.py build
+## Network Protocol & API Endpoint Matrix
 
-\# Flash binaries and open the serial monitor to view real-time logs  
-idf.py \-p \[PORT\] flash monitor
+The Master Node exposes an embedded HTTP server listening on port `80`. Slave nodes and external base stations communicate with the robot using standardized REST endpoints.
 
-*(Replace \[PORT\] with your specific COM port, such as COM3 on Windows or /dev/ttyUSB0 on Linux).*
+| Endpoint | HTTP Method | Target Clients | Query Parameters / Payload JSON | Technical Behavior |
+| --- | --- | --- | --- | --- |
+| `/mode` | `GET` | Python GUI / Workstation | `?state=[run|calib|idle|preview]` | Transitions the global enum state machine and alters algorithmic data routing. |
+| `/drive` | `GET` | Python Autonomous Loop | `?dir=[F|B|L|R]&pct=[0-100]&resp=[0-100]` | Modifies wave attributes: updates travel directions, scales overall amplitudes, and shifts steering variables ($\beta$). |
+| `/calib` | `POST` | `Calibration.py` Utility | JSON payload containing an array of 14 signed integer offset parameters. | Writes calibration parameters directly into the NVS Flash partition `sally/offsets`. |
+| `/angles` | `GET` | Slave `WIFI_Movement` Nodes | `?id=[0-7]` | Serializes the requested segment array from the central memory block into a JSON string format. |
 
-[image1]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADIAAAAZCAYAAABzVH1EAAACgUlEQVR4Xu1WPUhbURSO1EKLYmkxBEOS+xKylHYoBIQWdHLQQTvo4N5FaNe2dOzQoUuhjmIpHTpZunUpGUod3QQRBAdFO+iQKYOKtt+Xd088ObkhCYhL3weHd893/u7JPfflpVIJEiToikwmM5TL5e4Z+kY+n88argHwD4vF4rjlQygUCvtWoihaog3PTWujcD82T09A8Kxz7i/kA9YLeD6D1CBV6wvuO+QI8gcb+Q2JrI8G/FYgn3x+CtcztCH0o7eLbY06+Fs2T09QjYiclsvlEeM2CH4V8kIIFJyGfoHTvK0dQ5DclifA12lLp9PD1tYXfCOHPA3Ig0qlctP6cJxcfEr3hctms6PQtxAzpX1DuM5G9iyvAfu3QDGeEvlqt7m+9kbwHAvNKPj1UDH4fmEs4zRv0W8j0GdcfH/aBC+aSR3fhNwRjhZ1rJ9AanpkXLzZTo3U4VvRvAVju4lpZBlSE51vSeqo8zk0+g34Ruqa88m3lX4ljfh72CLgz2xu5uWmVXyVPmjICdcTEHTAQJn9q2rE8gTjbW7oL5H7kV/P044ary6jAoDTqS0iG3d+9vH8YYulLi/7BorcVXwbfK6eGxGgmZ+04RlRR53XWL43bjFUkUHFNU5ENoj1O+/XvNQsDP0X5CvUAeFDUDXa4Do3MuDjzoVgLTajnZqAcQ//ExOGY4Jj0WXT8JtTPo8hJ5jbjHCd0G8jvAvY8A74aqlUuqN8T3inRW8BjuoNHHZFd/Fb6xwyr/3YLJMrP17A5q8VAi8z8i9KI37d+FPF+qm/7BfetkQ9FY+sfLrwNTzGxoDnwpkyrUCit3Ba7tgxwE8XX2Ql8BmTIEGCBAn+L/wD5z4Q56/hM44AAAAASUVORK5CYII=>
+### Network Payload JSON Specification (Example)
+
+When a slave node assigned to a leg module requests data from the master via `/angles?id=4`, the Master server constructs the following structured JSON response packet:
+
+```json
+{
+  "device_id": 4,
+  "period": 2,
+  "angles": [84.50, 92.15, 88.00, 90.00]
+}
+
+```
+
+---
+
+## Local Hardware Actuation (LEDC Peripheral Driver)
+
+When a node receives its targets via network serialization, it decodes the payload using the `cJSON` component and updates its hardware profiles. The actual positioning of the analog micro-servos is controlled by translating logical degrees into raw timer ticks using the ESP32-C3 **LEDC** peripheral interface.
+
+```mermaid
+graph LR
+    A[cJSON Floats: Degrees Array] -->|Validation: 0° to 180°| B[Hardware Mapping Equation]
+    B -->|Calculated Pulse Width Time| C[Duty Cycle Register Translation]
+    C -->|Write Bits to LEDC HW Channel| D[Physical Servo Actuator]
+
+```
+
+### Mathematical PWM Register Mapping
+
+The hardware timing configurations are defined as follows:
+
+* **PWM Frequency ($f_{\text{pwm}}$):** $50\text{ Hz}$ (Standard analog servo repetition control rate, equivalent to a $20\text{ ms}$ baseline window period).
+* **Timer Counter Resolution ($R$):** $14\text{ bits}$ ($\text{Max Ticks} = 2^{14} - 1 = 16,383$).
+
+The absolute pulse-width times ($T_{\text{pulse}}$) required to drive standard micro-servos are bounded between a $0.5\text{ ms}$ minimum limit and a $2.5\text{ ms}$ maximum limit:
+
+$$T_{\text{pulse}}(\theta) = 0.5\text{ ms} + \left(\frac{\theta}{180^\circ}\right) \cdot (2.0\text{ ms})$$
+
+To find the corresponding integer count value ($D_{\text{reg}}$) for the 14-bit duty cycle register, the embedded firmware computes the following transformation:
+
+$$D_{\text{reg}}(\theta) = \left( \frac{T_{\text{pulse}}(\theta)}{20\text{ ms}} \right) \cdot (2^{14} - 1) = \left( \frac{0.5\text{ ms} + \frac{\theta}{180^\circ} \cdot 2.0\text{ ms}}{20\text{ ms}} \right) \cdot 16,383$$
+
+Evaluating the linear boundary coefficients simplifies the hardware translation script to:
+
+$$D_{\text{reg}}(\theta) = \text{round}\left( 409.575 + \theta \cdot 9.1016 \right)$$
+
+This direct equation maps any raw input angle $\theta \in [0^\circ, 180^\circ]$ to its corresponding bit array value, enabling immediate register updates via the native API call `ledc_set_duty()`.
+
+---
+
+## Low-Level Memory Management: Non-Volatile Storage (NVS)
+
+SALLI preserves its physical joint calibrations across complete power cuts by reading and writing variables into the flash chip's NVS partition.
+
+```mermaid
+flowchart TD
+    subgraph Flash ["ESP32-C3 Flash Memory"]
+        subgraph Partition ["'sally' Namespace Partition"]
+            direction LR
+            subgraph Table ["Data Structure Mapping"]
+                direction TB
+                K1["Key Name: 'offsets'"] 
+                T1["Data Type: int8_t Array [14 elements]"]
+                K1 --- T1
+            end
+        end
+    end
+
+    %% Estilos de los contenedores y nodos
+    style Flash fill:#1a1a1a,stroke:#333,stroke-width:2px,color:#fff
+    style Partition fill:#2d2d2d,stroke:#555,stroke-width:1px,color:#fff
+    style Table fill:#222,stroke:#444,stroke-width:1px,color:#fff
+    style K1 fill:#3d3d3d,stroke:#777,color:#fff
+    style T1 fill:#3d3d3d,stroke:#777,color:#fff
+```
+
+### Flash Read / Write Operational Sequence
+
+1. **Boot Initialization:** During `app_main`, the function `nvs_flash_init()` mounts the physical block storage. If a size mismatch error is returned, the sectors are formatted and re-initialized.
+2. **Handle Allocation:** The application requests a secure communication link by calling `nvs_open("sally", NVS_READWRITE, &my_handle)`.
+3. **Array Extraction:** On initialization, `nvs_get_blob(my_handle, "offsets", target_array, &length)` retrieves the signed 8-bit integer calibration array. If the key is missing, a default zero-vector is generated.
+4. **Serialization and Commits:** When a configuration payload hits the `/calib` REST target, the input data array updates the active volatile registers. It is then serialized into the storage page via `nvs_set_blob()`, followed immediately by an explicit `nvs_commit()` call to flush the registers to physical memory blocks.
