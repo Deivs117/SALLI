@@ -18,6 +18,11 @@
 
 # Ignore ESP-IDF Managed Components (often local/generated)
 **/managed_components/
+**/components/
+
+# Paths to ignored components
+Firmware/WIFI_Movement/components/components/
+Firmware/Acces Point Sally/components/components/
 
 # --- Standard OS Files ---
 .DS_Store
